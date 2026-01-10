@@ -1,0 +1,30 @@
+# Control de versiones
+.git/
+.gitignore
+.DS_Store
+
+# Entornos virtuales y dependencias
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.spec
+.Python
+.coverage
+htmlcov/
+
+# Logs y temporales
+*.log
+/tmp/
+
+# Configuración de IDE/Editor
+.vscode/
+.idea/
+*.swp
+
+# Distribución
+dist/
+build/
+*.egg-info/

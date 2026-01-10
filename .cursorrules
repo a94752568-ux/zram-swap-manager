@@ -1,0 +1,23 @@
+# Reglas para Zram & Swap Manager Pro
+
+## Contexto del Proyecto
+Este es un gestor de Zram y Swap para Linux escrito en Python utilizando CustomTkinter.
+El objetivo es proporcionar una interfaz moderna para optimizar la memoria del sistema.
+
+## Pautas de Código
+- **Lenguaje**: Python 3.12+
+- **UI Framework**: CustomTkinter (Modo oscuro por defecto).
+- **Idioma**: Español para comentarios, documentación y textos de la interfaz.
+
+## Interacción con el Sistema
+- Utilizar `subprocess` para ejecutar comandos de shell.
+- La elevación de privilegios se maneja mediante `pkexec` ejecutando scripts temporales generados en `/tmp/`.
+- Asegurar que los comandos críticos (swapon, zramctl) tengan manejo de errores.
+
+## Estilo
+- Seguir PEP 8.
+- Mantener la estructura de clases separando la lógica del sistema (`SystemManager`) de la interfaz (`ZramSwapManager`).
+- Usar f-strings para formateo de cadenas.
+
+## Archivos Ignorados
+- No indexar carpetas `venv` ni archivos compilados de Python.
