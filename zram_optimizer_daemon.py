@@ -47,12 +47,13 @@ class OptimizerDaemon:
         
         # Cargar configuración inicial
         self.load_config()
+        self.last_config_check = time.time()
         
         # Manejo de señales para cierre limpio
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
 
-    def load_config(self):
+    def load_config(self, quiet=False):
         """Intenta cargar la configuración del usuario."""
         config_path = None
         
@@ -80,7 +81,8 @@ class OptimizerDaemon:
             try:
                 with open(config_path, 'r') as f:
                     self.config = json.load(f)
-                logger.info(f"Configuración cargada desde {config_path}")
+                if not quiet:
+                    logger.info(f"Configuración cargada desde {config_path}")
             except Exception as e:
                 logger.error(f"Error cargando configuración: {e}")
         else:
@@ -98,13 +100,21 @@ class OptimizerDaemon:
                 # Estadísticas
                 mem = psutil.virtual_memory()
                 cpu = psutil.cpu_percent(interval=2) # Bloqueante 2s (ciclo del demonio)
+
+                # Recargar preferencias cada 2 min (incluye llm_overrides aplicados desde la GUI)
+                if time.time() - self.last_config_check > 120:
+                    self.last_config_check = time.time()
+                    self.load_config(quiet=True)
+                overrides = self.config.get('llm_overrides') or {}
                 
                 # Actualizar predictor IA
                 self.predictor.update(mem.percent, cpu)
                 
                 # 1. Optimización Dinámica de Memoria
                 if self.config.get('zram_dynamic', True):
-                    opt_swappiness = self.predictor.get_optimal_swappiness(self.config.get('swappiness', 60))
+                    # El asesor LLM (si fue consultado) define la base de swappiness
+                    base_swappiness = overrides.get('swappiness', self.config.get('swappiness', 60))
+                    opt_swappiness = self.predictor.get_optimal_swappiness(base_swappiness)
                     opt_cache = self.predictor.get_optimal_cache_pressure()
                     
                     if abs(opt_swappiness - self.current_live_swappiness) > 5:
@@ -124,13 +134,16 @@ class OptimizerDaemon:
                     
                     # Ajuste de Frecuencia (Cap)
                     target_cap = self.predictor.suggest_cpu_cap(cpu, cur_temp)
+                    # Techo estratégico definido por el asesor LLM (si existe)
+                    if 'cpu_cap' in overrides:
+                        target_cap = min(target_cap, overrides['cpu_cap'])
                     limits = self.system_manager.get_cpu_freq_limits()
                     target_freq = int(limits['min'] + (limits['max'] - limits['min']) * (target_cap / 100))
                     self.system_manager.set_cpu_max_freq(target_freq)
                     
-                    # Ajuste de EPP
+                    # Ajuste de EPP (el asesor LLM puede fijar una preferencia estratégica)
                     if self.system_manager.check_epp_support():
-                        target_epp = self.predictor.suggest_epp(cpu)
+                        target_epp = overrides.get('epp') or self.predictor.suggest_epp(cpu)
                         if target_epp != self.current_live_epp:
                             self.system_manager.set_energy_performance_preference(target_epp)
                             self.current_live_epp = target_epp
@@ -146,3 +159,4 @@ if __name__ == "__main__":
         
     daemon = OptimizerDaemon()
     daemon.run()
+
