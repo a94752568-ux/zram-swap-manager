@@ -358,21 +358,6 @@ class HardwareView(BaseView):
         ctk.CTkButton(custom_frame, text="▶️ Cargar", command=self.load_selected_profile, width=80, fg_color=THEME["success"]).pack(side="left", padx=5)
         ctk.CTkButton(custom_frame, text="🗑️", command=self.delete_selected_profile, width=40, fg_color=THEME["danger"]).pack(side="left", padx=5)
 
-    def update_profiles_combo(self):
-        self.profiles_combo.configure(values=list(self.app.custom_profiles.keys()))
-        if self.app.custom_profiles:
-            self.profiles_combo.set(list(self.app.custom_profiles.keys())[0])
-        else:
-            self.profiles_combo.set("")
-
-    def load_selected_profile(self):
-        name = self.profiles_combo.get()
-        if name: self.app.apply_custom_profile(name)
-
-    def delete_selected_profile(self):
-        name = self.profiles_combo.get()
-        if name: self.app.delete_custom_profile(name)
-
         # --- CPU Control ---
         cpu_card = self.create_card("Procesador (CPU)")
         cpu_card.pack(fill="x", padx=20, pady=10)
@@ -539,6 +524,21 @@ class HardwareView(BaseView):
             self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
             
             self.app.hardware_view_ref = self
+
+    def update_profiles_combo(self):
+        self.profiles_combo.configure(values=list(self.app.custom_profiles.keys()))
+        if self.app.custom_profiles:
+            self.profiles_combo.set(list(self.app.custom_profiles.keys())[0])
+        else:
+            self.profiles_combo.set("")
+
+    def load_selected_profile(self):
+        name = self.profiles_combo.get()
+        if name: self.app.apply_custom_profile(name)
+
+    def delete_selected_profile(self):
+        name = self.profiles_combo.get()
+        if name: self.app.delete_custom_profile(name)
 
     def update_uv_profiles_combo(self):
         self.uv_profiles_combo.configure(values=list(self.app.undervolt_profiles.keys()))
