@@ -14,6 +14,7 @@ import tkinter.messagebox as messagebox
 from config import THEME, logger
 from system_manager import SystemManager
 from optimizer import LightweightPredictor
+from llm_advisor import OllamaAdvisor
 from views import ZramView, SwapView, MonitorView, AdvancedView, HardwareView
 from utils import ToolTip
 
@@ -34,6 +35,9 @@ class ZramSwapManager(ctk.CTk):
         
         self.system_manager = SystemManager()
         self.predictor = LightweightPredictor()
+        self.llm_advisor = OllamaAdvisor()
+        self.llm_overrides = {}
+        self._llm_running = False
         
         # Variables
         self.total_ram = self.system_manager.get_total_ram()
@@ -675,6 +679,164 @@ class ZramSwapManager(ctk.CTk):
         except Exception:
             pass
 
+    # --- Asesor LLM local (Ollama, bajo demanda) ---
+    def consult_llm(self):
+        """Recoge métricas y consulta al LLM local en un hilo aparte (botón de la GUI)."""
+        if self._llm_running:
+            return
+
+        # Capturar métricas en el hilo principal (Tkinter no es thread-safe)
+        mem = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+        try:
+            cpu_freq = psutil.cpu_freq()
+        except Exception:
+            cpu_freq = None
+        cur_temp = 0
+        try:
+            temps = psutil.sensors_temperatures() or {}
+            for name, entries in temps.items():
+                if 'cpu' in name.lower() or 'k10temp' in name.lower() or 'core' in name.lower():
+                    cur_temp = entries[0].current
+                    break
+        except Exception:
+            pass
+
+        limits = self.cpu_limits
+        metrics = {
+            'ram_total_mb': int(self.total_ram),
+            'ram_available_mb': int(mem.available / (1024**2)),
+            'ram_used_percent': mem.percent,
+            'ram_predicted_percent': round(self.predictor.predict_next_minute_ram(), 1),
+            'swap_used_percent': swap.percent,
+            'cpu_percent': psutil.cpu_percent(interval=None),
+            'cpu_temp_c': cur_temp,
+            'cpu_freq_current_mhz': int(cpu_freq.current) if cpu_freq else 0,
+            'cpu_freq_min_mhz': limits['min'] // 1000,
+            'cpu_freq_max_mhz': limits['max'] // 1000,
+            'zram_enabled': self._gui_state.get('zram_enabled', False),
+            'zram_size_mb': self._gui_state.get('zram_size', 0),
+            'compression_algo': self.compression_algo.get(),
+            'current_swappiness': self._gui_state.get('swappiness', 60),
+            'epp_supported': self.epp_supported,
+            'governor': self.system_manager.get_cpu_details().get('governor', 'unknown'),
+        }
+
+        self._llm_running = True
+        self._set_llm_status(f"Consultando a {self.llm_advisor.model}...", running=True)
+        threading.Thread(target=self._llm_worker, args=(metrics,), daemon=True).start()
+
+    def _llm_worker(self, metrics):
+        """Hilo secundario: llama a Ollama con timeout propio; nunca bloquea la GUI."""
+        rec = None
+        error = None
+        try:
+            rec = self.llm_advisor.consult(metrics)
+        except Exception as e:
+            logger.error(f"Error consultando al LLM local: {e}")
+            error = str(e)
+        self.after(0, lambda: self._llm_finished(rec, error))
+
+    def _llm_finished(self, rec, error):
+        """Hilo principal: muestra el resultado y ofrece aplicar las recomendaciones."""
+        self._llm_running = False
+
+        if rec is None:
+            self._set_llm_status("No disponible", running=False)
+            self._show_llm_result(
+                "⚠️ No se pudo obtener una recomendación del LLM local.\n\n"
+                f"Detalle: {error or 'respuesta inválida'}\n\n"
+                "Verifica que el servicio de Ollama esté activo:\n"
+                "  systemctl --user status ollama   (o 'ollama serve')\n"
+                f"y que el modelo exista: ollama pull {self.llm_advisor.model}"
+            )
+            return
+
+        self._set_llm_status("Listo ✔", running=False)
+        lines = [f"🧠 Asesor LLM local ({self.llm_advisor.model})", ""]
+        if 'summary' in rec:
+            lines.append(f"Resumen: {rec['summary']}")
+        lines.append("Recomendaciones:")
+        if 'swappiness' in rec:
+            lines.append(f"  • vm.swappiness = {rec['swappiness']} (actual: {self._gui_state.get('swappiness', 60)})")
+        if 'vfs_cache_pressure' in rec:
+            lines.append(f"  • vm.vfs_cache_pressure = {rec['vfs_cache_pressure']}")
+        if 'cpu_cap' in rec:
+            lines.append(f"  • Límite de CPU = {rec['cpu_cap']}%")
+        if 'epp' in rec:
+            lines.append(f"  • EPP = {rec['epp']}")
+        if 'reason' in rec:
+            lines.append("")
+            lines.append(f"Razonamiento: {rec['reason']}")
+        self._show_llm_result("\n".join(lines))
+
+        rec_keys = ('swappiness', 'vfs_cache_pressure', 'cpu_cap', 'epp')
+        if any(k in rec for k in rec_keys):
+            if messagebox.askyesno("🧠 Asesor LLM", "¿Aplicar estas recomendaciones ahora?\n\n(el daemon las usará como base/techo de sus ajustes)"):
+                self._apply_llm_recs(rec)
+
+    def _apply_llm_recs(self, rec):
+        """Aplica las recomendaciones validadas del LLM y las persiste para el daemon."""
+        applied = []
+        if 'swappiness' in rec:
+            self.swappiness_var.set(rec['swappiness'])
+            self.update_swappiness_label(rec['swappiness'])
+            applied.append(f"swappiness={rec['swappiness']}")
+
+        if 'swappiness' in rec or 'vfs_cache_pressure' in rec:
+            self.system_manager.apply_live_tuning(
+                rec.get('swappiness', self._gui_state.get('swappiness', 60)),
+                rec.get('vfs_cache_pressure', 100)
+            )
+            if 'vfs_cache_pressure' in rec:
+                applied.append(f"cache_pressure={rec['vfs_cache_pressure']}")
+
+        if 'cpu_cap' in rec:
+            freq = int(self.cpu_limits['min'] + (self.cpu_limits['max'] - self.cpu_limits['min']) * (rec['cpu_cap'] / 100))
+            self.system_manager.set_cpu_max_freq(freq)
+            applied.append(f"cap={rec['cpu_cap']}%")
+
+        if 'epp' in rec and self.epp_supported:
+            self.system_manager.set_energy_performance_preference(rec['epp'])
+            self.current_live_epp = rec['epp']
+            applied.append(f"epp={rec['epp']}")
+
+        # Persistir para que el daemon las respete (recarga preferences.json cada 2 min)
+        self.llm_overrides = {k: rec[k] for k in ('swappiness', 'vfs_cache_pressure', 'cpu_cap', 'epp') if k in rec}
+        self.save_preferences()
+
+        if applied:
+            self.system_manager.send_notification("🧠 Asesor LLM local", "Recomendaciones aplicadas: " + ", ".join(applied))
+            logger.info(f"Recomendaciones del LLM aplicadas: {', '.join(applied)}")
+
+    def _set_llm_status(self, text, running=False):
+        """Actualiza el estado del botón/etiqueta del asesor LLM (hilo principal)."""
+        def _upd():
+            ref = self.monitor_view_ref
+            if ref is None or not ref.winfo_exists():
+                return
+            try:
+                ref.llm_status_label.configure(text=f"Ollama: {text}")
+                ref.llm_btn.configure(state="disabled" if running else "normal")
+            except Exception:
+                pass
+        self.after(0, _upd)
+
+    def _show_llm_result(self, text):
+        """Escribe el resultado del asesor LLM en el panel de la vista Monitor."""
+        def _upd():
+            ref = self.monitor_view_ref
+            if ref is None or not ref.winfo_exists():
+                return
+            try:
+                ref.llm_result_text.configure(state="normal")
+                ref.llm_result_text.delete("1.0", "end")
+                ref.llm_result_text.insert("1.0", text)
+                ref.llm_result_text.configure(state="disabled")
+            except Exception:
+                pass
+        self.after(0, _upd)
+
     def start_monitoring(self):
         """Inicia el monitoreo en tiempo real"""
         def monitor():
@@ -1161,6 +1323,7 @@ free -h
             if 'ram_alert_threshold' in data: self.ram_alert_threshold.set(data['ram_alert_threshold'])
             if 'custom_profiles' in data: self.custom_profiles = data['custom_profiles']
             if 'undervolt_profiles' in data: self.undervolt_profiles = data['undervolt_profiles']
+            if 'llm_overrides' in data: self.llm_overrides = data['llm_overrides']
             
             # Actualizar UI
             self.update_zram_size_label(self.zram_size.get())
@@ -1221,7 +1384,8 @@ free -h
                 'compression_algo': self.compression_algo.get(),
                 'swappiness': self.swappiness_var.get(),
                 'ram_alert_threshold': self.ram_alert_threshold.get(),
-                'swap_location': self.swap_location.get() if hasattr(self, 'swap_location') else "/swapfile"
+                'swap_location': self.swap_location.get() if hasattr(self, 'swap_location') else "/swapfile",
+                'llm_overrides': self.llm_overrides
             }
             
             with open(config_file, 'w') as f:
@@ -1245,4 +1409,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
