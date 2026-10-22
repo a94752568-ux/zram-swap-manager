@@ -135,6 +135,29 @@ class MonitorView(BaseView):
         self.ai_pred_ram_label = self.create_mini_stat(self.ai_stats_frame, "RAM Predicha", 1)
         self.ai_swappiness_label = self.create_mini_stat(self.ai_stats_frame, "Swappiness IA", 2)
         self.ai_cache_label = self.create_mini_stat(self.ai_stats_frame, "Presión Caché", 3)
+
+        # Asesor LLM local (Ollama): consulta bajo demanda
+        self.llm_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.llm_frame.pack(fill="x", padx=20, pady=5)
+
+        self.llm_btn = ctk.CTkButton(
+            self.llm_frame,
+            text="🧠 Consultar al LLM (Ollama)",
+            command=self.app.consult_llm,
+            fg_color=THEME["success"],
+            hover_color="#28a745",
+            height=30
+        )
+        self.llm_btn.pack(side="left", pady=5)
+        ToolTip(self.llm_btn, "Consulta a un LLM local (Ollama) para obtener recomendaciones de optimización y su explicación.")
+
+        self.llm_status_label = ctk.CTkLabel(self.llm_frame, text="Ollama: --", font=ctk.CTkFont(size=12), text_color=THEME["text_sec"])
+        self.llm_status_label.pack(side="left", padx=10)
+
+        self.llm_result_text = ctk.CTkTextbox(self, font=ctk.CTkFont(size=12), fg_color="#111111", height=140)
+        self.llm_result_text.pack(fill="x", padx=20, pady=(0, 10))
+        self.llm_result_text.insert("1.0", "Las recomendaciones del LLM local aparecerán aquí tras pulsar el botón.")
+        self.llm_result_text.configure(state="disabled")
         
         # Sección de Hardware en Tiempo Real
         self.hw_label = ctk.CTkLabel(self, text="🖥️ Hardware en Tiempo Real", font=ctk.CTkFont(size=18, weight="bold"))
@@ -222,7 +245,7 @@ class MonitorView(BaseView):
         widgets_to_hide = [
             self.stats_frame, self.ai_label, self.ai_stats_frame, 
             self.hw_label, self.hw_frame, self.cores_label, self.cores_frame, 
-            self.log_card
+            self.llm_frame, self.llm_result_text, self.log_card
         ]
         
         if is_mini:
@@ -241,6 +264,8 @@ class MonitorView(BaseView):
             self.stats_frame.pack(fill="x", padx=20, pady=10)
             self.ai_label.pack(pady=(20,10), padx=20, anchor="w")
             self.ai_stats_frame.pack(fill="x", padx=20, pady=5)
+            self.llm_frame.pack(fill="x", padx=20, pady=5)
+            self.llm_result_text.pack(fill="x", padx=20, pady=(0, 10))
             self.hw_label.pack(pady=(20,10), padx=20, anchor="w")
             self.hw_frame.pack(fill="x", padx=20, pady=5)
             self.cores_label.pack(pady=(10,5), padx=20, anchor="w")
@@ -617,3 +642,4 @@ class AdvancedView(BaseView):
         console_card.pack(fill="both", expand=True, padx=20, pady=10)
         self.app.command_output = ctk.CTkTextbox(console_card, font=ctk.CTkFont(family="Courier", size=12), fg_color="#000000")
         self.app.command_output.pack(fill="both", expand=True, padx=10, pady=10)
+
