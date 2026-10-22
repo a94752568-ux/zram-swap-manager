@@ -81,6 +81,11 @@ class ZramSwapManager(ctk.CTk):
             self.apply_uv_on_boot.set(self.system_manager.is_undervolt_service_enabled())
         self.temp_stats = {'min': 1000, 'max': 0}
         
+        # Snapshot de las variables Tkinter, para lectura segura desde el hilo de monitoreo
+        self._gui_state = {}
+        self._update_gui_state()
+        self.after(1000, self._poll_gui_state)
+        
         self.configure(fg_color=THEME["bg_main"])
         
         self.create_layout()
@@ -489,8 +494,7 @@ class ZramSwapManager(ctk.CTk):
             if hasattr(self, 'cpu_slider'): self.cpu_slider.configure(state="disabled")
             if hasattr(self, 'freq_max_combo'): self.freq_max_combo.configure(state="disabled")
             if hasattr(self, 'freq_min_combo'): self.freq_min_combo.configure(state="disabled")
-            if hasattr(self, 'optimization_status_label'):
-                self.optimization_status_label.configure(text="Iniciando IA...", text_color=THEME["accent"])
+            self._set_optimization_status("Iniciando IA...", THEME["accent"])
         else:
             # Desactivar: Restaurar
             self.system_manager.set_cpu_boost(True)
@@ -501,8 +505,7 @@ class ZramSwapManager(ctk.CTk):
             if hasattr(self, 'cpu_slider'): self.cpu_slider.configure(state="normal")
             if hasattr(self, 'freq_max_combo'): self.freq_max_combo.configure(state="normal")
             if hasattr(self, 'freq_min_combo'): self.freq_min_combo.configure(state="normal")
-            if hasattr(self, 'optimization_status_label'):
-                self.optimization_status_label.configure(text="")
+            self._set_optimization_status("")
 
     def apply_energy_profile(self, profile):
         """Aplica un perfil de energía predefinido."""
@@ -628,6 +631,50 @@ class ZramSwapManager(ctk.CTk):
             if self.hardware_view_ref:
                 self.hardware_view_ref.update_profiles_combo()
 
+    def _update_gui_state(self):
+        """Lee las variables Tkinter en el hilo principal y las guarda en un dict
+        seguro para ser consultado desde hilos secundarios."""
+        try:
+            self._gui_state = {
+                'zram_enabled': self.zram_enabled.get(),
+                'zram_dynamic': self.zram_dynamic.get(),
+                'zram_size': self.zram_size.get(),
+                'swappiness': self.swappiness_var.get(),
+                'ram_alert_threshold': self.ram_alert_threshold.get(),
+                'auto_undervolt': self.auto_undervolt.get(),
+            }
+        except Exception as e:
+            logger.debug(f"No se pudo actualizar el snapshot de la GUI: {e}")
+
+    def _poll_gui_state(self):
+        """Refresca el snapshot de la GUI cada segundo mientras la app está activa."""
+        if not self.monitoring:
+            return
+        self._update_gui_state()
+        self.after(1000, self._poll_gui_state)
+
+    def _set_optimization_status(self, text, color=None):
+        """Actualiza la etiqueta de estado de optimización de la vista Hardware (hilo principal)."""
+        ref = self.hardware_view_ref
+        if ref is not None and hasattr(ref, 'optimization_status_label'):
+            try:
+                if ref.optimization_status_label.winfo_exists():
+                    ref.optimization_status_label.configure(
+                        text=text, text_color=color if color is not None else THEME["text"]
+                    )
+            except Exception:
+                pass
+
+    def _update_service_status_ui(self, color, text):
+        """Actualiza el indicador de estado del daemon (hilo principal)."""
+        try:
+            if self.service_dot.winfo_exists():
+                self.service_dot.configure(text_color=color)
+            if self.service_label.winfo_exists():
+                self.service_label.configure(text=text)
+        except Exception:
+            pass
+
     def start_monitoring(self):
         """Inicia el monitoreo en tiempo real"""
         def monitor():
@@ -670,9 +717,12 @@ class ZramSwapManager(ctk.CTk):
                     
                     self.predictor.update(used_percent, cpu)
                     
+                    # Leer valores de la GUI desde el snapshot (seguro entre hilos)
+                    gui = self._gui_state
+                    
                     # Calcular valores de IA para visualización (y uso posterior)
                     predicted_ram = self.predictor.predict_next_minute_ram()
-                    opt_swappiness = self.predictor.get_optimal_swappiness(self.swappiness_var.get())
+                    opt_swappiness = self.predictor.get_optimal_swappiness(gui['swappiness'])
                     opt_cache = self.predictor.get_optimal_cache_pressure()
                     
                     self.ram_history.append(used_percent)
@@ -688,8 +738,8 @@ class ZramSwapManager(ctk.CTk):
                         
                         monitor_data = {
                             'ram_available': available,
-                            'zram_effective': self.zram_size.get() * (2.8 if self.zram_dynamic.get() else 2.5),
-                            'compression_ratio': 2.8 if self.zram_dynamic.get() else 2.5,
+                            'zram_effective': gui['zram_size'] * (2.8 if gui['zram_dynamic'] else 2.5),
+                            'compression_ratio': 2.8 if gui['zram_dynamic'] else 2.5,
                             'cpu_percent': cpu,
                             'predicted_ram': predicted_ram,
                             'opt_swappiness': opt_swappiness,
@@ -708,9 +758,6 @@ class ZramSwapManager(ctk.CTk):
                     # --- Update Hardware View ---
                     opt_status = ""
                     opt_status_color = THEME["text"]
-                    if hasattr(self, 'optimization_status_label'):
-                        opt_status = self.optimization_status_label.cget("text")
-                        opt_status_color = self.optimization_status_label.cget("text_color")
 
                     if cur_temp > 0:
                         self.temp_stats['min'] = min(self.temp_stats['min'], cur_temp)
@@ -732,7 +779,20 @@ class ZramSwapManager(ctk.CTk):
                                 'gpu_text': gpu_text,
                                 'gpu_color': gpu_color
                             }
-                            self.after(0, lambda: self.hardware_view_ref.update_stats(hw_data) if self.hardware_view_ref else None)
+                            def _update_hw(data=hw_data):
+                                ref = self.hardware_view_ref
+                                if ref is None or not ref.winfo_exists():
+                                    return
+                                try:
+                                    # Preservar el estado de IA mostrado (leer en el hilo principal)
+                                    lbl = getattr(ref, 'optimization_status_label', None)
+                                    if lbl is not None and lbl.winfo_exists():
+                                        data['opt_status'] = lbl.cget("text")
+                                        data['opt_status_color'] = lbl.cget("text_color")
+                                    ref.update_stats(data)
+                                except Exception:
+                                    pass
+                            self.after(0, _update_hw)
                         
                         # Alerta de Temperatura Alta (> 85°C)
                         if cur_temp > 85:
@@ -745,14 +805,13 @@ class ZramSwapManager(ctk.CTk):
                                 self.last_temp_notification_time = current_time
 
                     # Service Status
-                    if hasattr(self, 'service_label') and self.service_label.winfo_exists():
+                    if hasattr(self, 'service_label'):
                         color = THEME["success"] if service_active else THEME["danger"]
                         text = "Daemon: Activo" if service_active else "Daemon: Inactivo"
-                        self.after(0, lambda: self.service_dot.configure(text_color=color))
-                        self.after(0, lambda: self.service_label.configure(text=text))
+                        self.after(0, lambda c=color, t=text: self._update_service_status_ui(c, t))
 
                     # --- Lógica de Undervolt Automático ---
-                    if self.auto_undervolt.get():
+                    if gui['auto_undervolt']:
                         # Sugerir límite basado en carga de CPU (LightweightPredictor)
                         # Si la carga es baja, bajamos el techo de frecuencia para forzar P-states bajos (menos voltaje)
                         target_cap_percent = self.predictor.suggest_cpu_cap(cpu, cur_temp)
@@ -761,9 +820,8 @@ class ZramSwapManager(ctk.CTk):
                         self.after(0, lambda: self.cpu_slider.set(target_cap_percent) if hasattr(self, 'cpu_slider') else None)
                         
                         # Actualizar etiqueta de estado de optimización
-                        if hasattr(self.hardware_view_ref, 'optimization_status_label') and self.hardware_view_ref.optimization_status_label.winfo_exists():
-                            status_text = f"⚡ IA Activa: Cap {target_cap_percent}% ({target_freq//1000} MHz)" # This is just for internal state, UI updated via update_stats
-                            self.after(0, lambda: self.hardware_view_ref.optimization_status_label.configure(text=status_text, text_color=THEME["success"]))
+                        status_text = f"⚡ IA Activa: Cap {target_cap_percent}% ({target_freq//1000} MHz)"
+                        self.after(0, lambda t=status_text: self._set_optimization_status(t, THEME["success"]))
                         
                         # Ajuste dinámico de EPP (Energy Performance Preference)
                         if self.epp_supported:
@@ -773,7 +831,7 @@ class ZramSwapManager(ctk.CTk):
                                 self.current_live_epp = target_epp
                     
                     # Sistema de Notificaciones de RAM Crítica
-                    if used_percent > self.ram_alert_threshold.get():
+                    if used_percent > gui['ram_alert_threshold']:
                         current_time = time.time()
                         if current_time - self.last_notification_time > 300:  # 5 minutos de enfriamiento
                             self.system_manager.send_notification(
@@ -783,14 +841,14 @@ class ZramSwapManager(ctk.CTk):
                             self.last_notification_time = current_time
                     
                     # --- Optimización Dinámica (AI/Heurística) ---
-                    if self.zram_dynamic.get():
+                    if gui['zram_dynamic']:
                         # Aplicar solo si hay un cambio significativo (evitar thrashing)
                         if abs(opt_swappiness - self.current_live_swappiness) > 5:
                             self.system_manager.apply_live_tuning(opt_swappiness, opt_cache)
                             self.current_live_swappiness = opt_swappiness
                     
                     # Ajuste dinámico de Zram
-                    if self.zram_enabled.get() and self.zram_dynamic.get():
+                    if gui['zram_enabled'] and gui['zram_dynamic']:
                         if used_percent > 70:
                             new_size = int(self.total_ram * 0.35)
                         elif used_percent > 50:
@@ -893,7 +951,7 @@ free -h
             'zram_size': self.zram_size.get(),
             'compression_algo': self.compression_algo.get(),
             'swap_enabled': self.swap_enabled.get(),
-            'swap_location': self.swap_location.get(),
+            'swap_location': self.swap_location.get() if hasattr(self, 'swap_location') else "/swapfile",
             'swap_size': self.swap_size.get(),
             'swappiness': self.swappiness_var.get()
         }
@@ -1000,7 +1058,7 @@ free -h
                                 "La configuración se aplicó correctamente.\n\nSalida:\n" + result.stdout,
                                 "success"
                             )
-                            self.update_monitor()
+                            self.check_current_status()
                         else:
                             self.show_result_dialog(
                                 "❌ Error al Aplicar",
@@ -1187,3 +1245,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
