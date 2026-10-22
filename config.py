@@ -41,3 +41,9 @@ THEME = {
     "text": "#FFFFFF",          # Blanco
     "text_sec": "#8E8E93"       # Gris secundario
 }
+
+# --- Asesor LLM local (Ollama), consulta bajo demanda desde la GUI ---
+OLLAMA_URL = "http://127.0.0.1:11434"
+OLLAMA_MODEL = "llama3.2:3b"
+OLLAMA_TIMEOUT = 120       # segundos; la inferencia 100% CPU puede tardar
+OLLAMA_KEEP_ALIVE = "5m"   # corto: no dejar el modelo residente demasiado tiempo
