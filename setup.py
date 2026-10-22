@@ -13,7 +13,7 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/a94752568-ux/zram-swap-manager",
     # Se listan los módulos individuales ya que la estructura es plana
-    py_modules=["zram_swap_manager", "system_manager", "views", "config", "utils", "optimizer"],
+    py_modules=["zram_swap_manager", "system_manager", "views", "config", "utils", "optimizer", "llm_advisor"],
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: System Administrators",
