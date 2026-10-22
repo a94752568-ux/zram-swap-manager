@@ -11,14 +11,29 @@ from optimizer import LightweightPredictor
 
 # Configuración de logging para el demonio
 LOG_FILE = "/var/log/zram_optimizer.log"
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [DAEMON] - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
-)
+
+def _setup_logging():
+    """
+    Configura los handlers del demonio.
+    Nota: config.py ya añade handlers al logger raíz, por lo que se usa force=True
+    para que este proceso realmente escriba en su propio archivo de log.
+    Si no hay permisos para /var/log (ej. ejecución sin root), solo usa consola.
+    """
+    try:
+        handlers = [
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler()
+        ]
+    except (PermissionError, OSError):
+        handlers = [logging.StreamHandler()]
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - [DAEMON] - %(message)s',
+        handlers=handlers,
+        force=True
+    )
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 class OptimizerDaemon:
