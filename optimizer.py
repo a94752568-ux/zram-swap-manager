@@ -1,115 +1,134 @@
 import collections
 import statistics
+
 from config import logger
+
 
 class LightweightPredictor:
     """
-    Motor de predicción optimizado para CPUs de bajo consumo (como AMD A8/E-Series).
-    Utiliza regresión lineal simple y heurística para predecir presión de memoria
-    sin overhead significativo.
+    Predictor ligero y neutral respecto al hardware para orientar ajustes de memoria.
+
+    La presión de memoria tiene prioridad sobre la carga de CPU: reducir swappiness
+    cuando la CPU está ocupada puede empeorar una situación de falta de RAM.
+    Este módulo solo calcula sugerencias; no aplica cambios al sistema.
     """
+
     def __init__(self, history_len=10):
+        if not isinstance(history_len, int) or history_len < 2:
+            raise ValueError("history_len debe ser un entero >= 2")
+
         self.ram_history = collections.deque(maxlen=history_len)
         self.cpu_history = collections.deque(maxlen=history_len)
-        # Pesos "Pre-entrenados" para perfil conservador (AMD A8)
         self.weight_ram_trend = 1.5
-        self.weight_cpu_penalty = 0.8
-        
+
+    @staticmethod
+    def _clamp_percent(value):
+        """Convierte una lectura a porcentaje válido; rechaza datos no numéricos."""
+        value = float(value)
+        if not 0 <= value <= 100:
+            raise ValueError("Los porcentajes deben estar entre 0 y 100")
+        return value
+
     def update(self, ram_percent, cpu_percent):
-        self.ram_history.append(ram_percent)
-        self.cpu_history.append(cpu_percent)
+        self.ram_history.append(self._clamp_percent(ram_percent))
+        self.cpu_history.append(self._clamp_percent(cpu_percent))
 
     def predict_next_minute_ram(self):
-        """Calcula la tendencia de RAM para el próximo minuto."""
+        """
+        Proyecta aproximadamente 30 segundos hacia delante.
+
+        Se asume que update() se llama cada 2 segundos. El nombre del método se
+        conserva por compatibilidad con versiones anteriores.
+        """
+        if not self.ram_history:
+            return 0.0
         if len(self.ram_history) < 2:
-            return self.ram_history[-1] if self.ram_history else 0
-            
-        # Cálculo simplificado de pendiente (slope)
-        deltas = [self.ram_history[i] - self.ram_history[i-1] for i in range(1, len(self.ram_history))]
+            return self.ram_history[-1]
+
+        deltas = [
+            self.ram_history[i] - self.ram_history[i - 1]
+            for i in range(1, len(self.ram_history))
+        ]
         avg_slope = statistics.mean(deltas)
-        
-        # Proyección a 30 segundos (asumiendo update cada 2s, son 15 pasos)
-        projection = self.ram_history[-1] + (avg_slope * 15 * self.weight_ram_trend)
-        return min(100, max(0, projection))
+        projection = self.ram_history[-1] + (
+            avg_slope * 15 * self.weight_ram_trend
+        )
+        return min(100.0, max(0.0, projection))
 
     def get_optimal_swappiness(self, current_swappiness):
         """
-        Determina el swappiness ideal basado en la predicción de RAM y carga de CPU.
+        Sugiere swappiness según la presión prevista de RAM.
+
+        La carga de CPU no reduce la sugerencia: con RAM escasa, hacerlo podría
+        aumentar el riesgo de presión de memoria u OOM. current_swappiness se
+        usa como valor de reserva si aún no hay mediciones.
         """
+        try:
+            fallback = max(0, min(100, int(current_swappiness)))
+        except (TypeError, ValueError):
+            fallback = 60
+
         if not self.ram_history:
-            return current_swappiness
+            return fallback
 
         predicted_ram = self.predict_next_minute_ram()
-        avg_cpu = statistics.mean(self.cpu_history) if self.cpu_history else 0
-        
-        target_swappiness = current_swappiness
 
-        # Lógica Difusa (Fuzzy Logic) optimizada
-        if predicted_ram > 90:
-            # Emergencia: Necesitamos swap agresivo
-            target_swappiness = 100
-        elif predicted_ram > 80:
-            # Presión alta
-            target_swappiness = 80
+        if predicted_ram >= 90:
+            target = 100
+        elif predicted_ram >= 80:
+            target = 80
         elif predicted_ram < 50:
-            # Memoria relajada
-            target_swappiness = 10
+            target = 10
         else:
-            # Zona media (50-80%), mantener equilibrio
-            target_swappiness = 60
+            target = 60
 
-        # Penalización por CPU (Específico para AMD A8)
-        # Si la CPU está saturada, comprimir memoria (Zram) cuesta mucho.
-        # Reducimos swappiness para dar respiro al procesador.
-        if avg_cpu > 85:
-            logger.info("CPU saturada (A8 Protection): Reduciendo agresividad de swap.")
-            target_swappiness = max(10, target_swappiness - 40)
-        elif avg_cpu > 60:
-            target_swappiness = max(10, target_swappiness - 20)
+        if self.cpu_history and statistics.mean(self.cpu_history) > 85:
+            logger.info(
+                "CPU muy ocupada; se mantiene la política basada en presión "
+                "de memoria para no agravar una posible falta de RAM."
+            )
 
-        return int(target_swappiness)
+        return target
 
     def get_optimal_cache_pressure(self):
-        """Ajusta vfs_cache_pressure."""
-        # Si falta RAM, preferimos liberar caché de archivos antes que swappear apps
-        predicted_ram = self.predict_next_minute_ram()
-        if predicted_ram > 80:
-            return 200 # Liberar caché agresivamente
-        return 100 # Valor por defecto
+        """Sugiere cache_pressure sin cambios agresivos innecesarios."""
+        if not self.ram_history:
+            return 100
+        return 150 if self.predict_next_minute_ram() >= 80 else 100
 
     def suggest_cpu_cap(self, current_cpu_load, current_temp=0):
         """
-        Sugiere un porcentaje de límite de frecuencia (Cap) para ahorrar energía (Undervolt Simulado).
-        Considera carga de CPU y Temperatura para mantener el procesador en su zona de eficiencia.
-        """
-        cap = 100
-        
-        # 1. Lógica base por carga (evitar saltar a frecuencias turbo por tareas de fondo)
-        if current_cpu_load > 85:
-            cap = 100 # Necesitamos toda la potencia
-        elif current_cpu_load > 50:
-            cap = 90  # Ligero recorte, evita picos de voltaje máximos
-        elif current_cpu_load > 20:
-            cap = 75  # Modo eficiente (sweet spot de muchos CPUs)
-        else:
-            cap = 60  # Modo ahorro máximo (idle/background)
+        Sugiere un límite porcentual de frecuencia; no es un undervolt real.
 
-        # 2. Penalización térmica (Thermal Throttling por Software)
-        # Si la temperatura sube, bajamos el techo para reducir voltaje/calor proactivamente
-        if current_temp > 85:
-            cap = min(cap, 70) # Emergencia: Enfriar sí o sí
-        elif current_temp > 75:
-            cap = min(cap, 85) # Preventivo: Mantener bajo control
-            
+        Los valores son orientativos y no sustituyen límites térmicos del kernel.
+        """
+        load = self._clamp_percent(current_cpu_load)
+        try:
+            temp = float(current_temp or 0)
+        except (TypeError, ValueError):
+            temp = 0
+
+        if load > 85:
+            cap = 100
+        elif load > 50:
+            cap = 90
+        elif load > 20:
+            cap = 75
+        else:
+            cap = 60
+
+        if temp > 85:
+            cap = min(cap, 70)
+        elif temp > 75:
+            cap = min(cap, 85)
+
         return cap
 
     def suggest_epp(self, current_cpu_load):
-        """
-        Sugiere el perfil EPP óptimo.
-        Estrategia: Race-to-Idle. Subir rendimiento rápido para acabar tareas, bajar a ahorro en reposo.
-        """
-        if current_cpu_load > 30:
-            return "balance_performance" # Respuesta rápida
-        elif current_cpu_load > 10:
-            return "balance_power"       # Equilibrio
-        return "power"                   # Ahorro máximo
+        """Sugiere una preferencia EPP según la carga actual de CPU."""
+        load = self._clamp_percent(current_cpu_load)
+        if load > 30:
+            return "balance_performance"
+        if load > 10:
+            return "balance_power"
+        return "power"
